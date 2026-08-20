@@ -1,0 +1,18 @@
+{
+  "name": "teia-operacional",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central de missoes (kanban) com API para automacoes n8n - Walace / AA Alternativa",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
