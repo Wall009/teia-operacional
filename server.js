@@ -33,18 +33,40 @@ const defaultCards = [
   { id: 'c12', title: 'Alertas de multas de frota', area: 'Frota', prio: 'baixa', status: 'entregue', prazo: '', notas: 'Infosimples DETRAN/DER-SP, piloto ativo.' },
 ];
 
+let seededNow = false; // true quando ESTE processo criou o arquivo com as missoes de exemplo
+
 function ensureStore() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify(defaultCards, null, 2));
+  if (!fs.existsSync(DATA_FILE)) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(defaultCards, null, 2));
+    seededNow = true;
+    console.warn('ATENCAO: ' + DATA_FILE + ' nao existia e foi recriado com as missoes de EXEMPLO. ' +
+      'Se voce ja tinha missoes, monte um volume persistente em /app/data.');
+  }
 }
 function readCards() {
   ensureStore();
-  try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
-  catch (e) { return []; }
+  const raw = fs.readFileSync(DATA_FILE, 'utf8');
+  try {
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) throw new Error('conteudo nao e uma lista');
+    return data;
+  } catch (e) {
+    // nunca devolve [] aqui: a proxima escrita apagaria tudo. Guarda copia e falha alto.
+    const bak = DATA_FILE + '.corrompido-' + Date.now();
+    try { fs.writeFileSync(bak, raw); } catch (_) {}
+    console.error('ERRO: cards.json ilegivel (' + e.message + '). Copia salva em ' + bak);
+    const err = new Error('cards.json ilegivel');
+    err.code = 'CORRUPT';
+    throw err;
+  }
 }
 function writeCards(cards) {
   ensureStore();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(cards, null, 2));
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cards, null, 2));
+  fs.renameSync(tmp, DATA_FILE); // troca atomica: nunca fica meio escrito
+  seededNow = false;
 }
 
 // ---------- auth simples por chave de API (usada pelo n8n e pelo front) ----------
@@ -70,7 +92,11 @@ async function maybeSendAlert(card, event) {
 }
 
 // ---------- rotas ----------
-app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get('/api/health', (req, res) => {
+  let count = null;
+  try { count = readCards().length; } catch (e) { count = null; }
+  res.json({ ok: count !== null, time: new Date().toISOString(), cards: count, seeded: seededNow, authRequired: !!API_KEY });
+});
 
 app.get('/api/cards', requireApiKey, (req, res) => {
   res.json(readCards());
@@ -124,6 +150,12 @@ app.delete('/api/cards/:id', requireApiKey, (req, res) => {
   if (next.length === cards.length) return res.status(404).json({ error: 'missao nao encontrada' });
   writeCards(next);
   res.status(204).end();
+});
+
+app.use((err, req, res, next) => {
+  if (err && err.code === 'CORRUPT') return res.status(500).json({ error: 'arquivo de dados ilegivel; copia de seguranca salva no servidor' });
+  console.error(err);
+  res.status(500).json({ error: 'erro interno' });
 });
 
 app.listen(PORT, () => {
