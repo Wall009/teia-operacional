@@ -298,12 +298,14 @@ select.sel:focus{outline:none;border-color:var(--yellow);}
     <div class="mode-switch" role="tablist" aria-label="Visão">
       <button class="mode-btn active" id="mode-teia" role="tab" aria-selected="true" type="button">🕸 Teia</button>
       <button class="mode-btn" id="mode-alfred" role="tab" aria-selected="false" type="button">🤖 Alfred</button>
+      <button class="mode-btn" id="mode-chamados" role="tab" aria-selected="false" type="button">🎫 Chamados</button>
     </div>
 
     <div class="top-actions">
       <button class="conn-pill" id="conn-pill" type="button" title="Abrir configuração da conexão">
         <span class="dot"></span><span id="conn-text">Conectando…</span>
       </button>
+      <a class="btn" id="btn-diretoria" href="/painel-chamados-diretoria.html" target="_blank" rel="noopener" style="display:none;text-decoration:none" title="Painel somente leitura para a diretoria">📊 Visão diretoria</a>
       <button class="btn btn-primary" id="btn-new" type="button">+ Nova missão</button>
       <button class="btn btn-icon" id="btn-settings" type="button" aria-label="Conexão com a API" title="Conexão com a API">⚙</button>
     </div>
@@ -452,6 +454,58 @@ select.sel:focus{outline:none;border-color:var(--yellow);}
   </div>
 </div>
 
+<!-- modal de chamado -->
+<div class="overlay" id="overlay-chamado" role="dialog" aria-modal="true" aria-labelledby="ch-modal-title">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <div class="modal-eyebrow" id="ch-modal-eyebrow">Novo chamado</div>
+        <h2 id="ch-modal-title">Registrar chamado</h2>
+      </div>
+      <button class="close-x" type="button" id="close-chamado" aria-label="Fechar">✕</button>
+    </div>
+    <form id="chamado-form">
+      <div class="field">
+        <label for="ch-titulo">Título</label>
+        <input type="text" id="ch-titulo" required maxlength="200" placeholder="Ex: Instalar impressora no financeiro">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="ch-solicitante">Solicitante</label>
+          <input type="text" id="ch-solicitante" maxlength="80" placeholder="Quem pediu">
+        </div>
+        <div class="field">
+          <label for="ch-categoria">Categoria</label>
+          <input type="text" id="ch-categoria" maxlength="60" placeholder="Ex: Sistema, Equipamento…">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="ch-prioridade">Prioridade</label>
+          <select id="ch-prioridade"><option value="Alta">Alta</option><option value="Media" selected>Média</option><option value="Baixa">Baixa</option></select>
+        </div>
+        <div class="field">
+          <label for="ch-status">Status</label>
+          <select id="ch-status"><option>Aberto</option><option>Em andamento</option><option>Aguardando</option><option>Resolvido</option></select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="ch-descricao">Descrição</label>
+        <textarea id="ch-descricao" placeholder="O que foi pedido…"></textarea>
+      </div>
+      <div class="field">
+        <label for="ch-notas">Notas internas</label>
+        <textarea id="ch-notas" placeholder="Andamento, observações…"></textarea>
+      </div>
+      <p class="field-hint" id="ch-info" style="display:none"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="cancel-chamado">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="chamado-save">Salvar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- modal de conexão -->
 <div class="overlay" id="overlay-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
   <div class="modal">
@@ -508,6 +562,13 @@ const DEFAULT_AREAS = ['Automação','Frota','Comercial','TI','Pessoal','RH','Fi
 // ids das 12 missões de exemplo que o servidor cria quando o arquivo de dados não existe
 const SEED_IDS = ['c1','c2','c3','c4','c5','c6','c7','c8','c9','c10','c11','c12'];
 const PORTFOLIO_BASE = 'https://webhook.servidorwall.online/webhook/portfolio';
+const CHAMADOS_BASE = 'https://webhook.servidorwall.online/webhook';
+const CH_COLUMNS = [
+  {id:'Aberto',       name:'Aberto (backlog)', color:'#7FA8FF'},
+  {id:'Em andamento', name:'Em andamento',     color:'#FFD321'},
+  {id:'Aguardando',   name:'Aguardando',       color:'#FFAA2B'},
+  {id:'Resolvido',    name:'Resolvido',        color:'#5BC0FF'},
+];
 const AUTO_REFRESH_MS = 15000;
 
 const $ = id => document.getElementById(id);
@@ -516,7 +577,9 @@ function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
 
 let cards = [];
 let projects = [];
-let mode = 'teia';        // teia | alfred
+let chamados = [];
+let chamadosError = false;
+let mode = 'teia';        // teia | alfred | chamados
 let quick = 'tudo';       // tudo | urgente | hoje | atrasadas
 let API_BASE = lsGet('teia_api_base');
 let API_KEY  = lsGet('teia_api_key');
@@ -622,6 +685,37 @@ async function apiDeleteProject(nome){
   catch(e){ toast('Não consegui excluir o projeto.', 'err'); await loadProjects(); return false; }
 }
 
+/* ---------- API (chamados) ---------- */
+function norm(s){ return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+function chStatus(c){ const n = norm(c.status); return (CH_COLUMNS.find(k => norm(k.id) === n) || CH_COLUMNS[0]).id; }
+function chPrio(c){ const n = norm(c.prioridade); return n.startsWith('alt') || n === 'urgente' ? 'urgente' : (n.startsWith('bai') ? 'baixa' : 'medio'); }
+function chPrioLabel(c){ return {urgente:'Alta', medio:'Média', baixa:'Baixa'}[chPrio(c)]; }
+function chNota(c){ const n = Number(c.nota); return n >= 1 && n <= 5 ? n : 0; }
+function chColName(id){ return (CH_COLUMNS.find(k => k.id === id) || {}).name || id; }
+async function chPost(path, body){
+  const res = await fetch(CHAMADOS_BASE + path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if(!res.ok) throw new ApiError('Erro ' + res.status, res.status);
+  return res;
+}
+async function loadChamados(){
+  try{
+    const res = await fetch(CHAMADOS_BASE + '/chamados-listar');
+    if(!res.ok) throw new Error('status ' + res.status);
+    const d = await res.json();
+    chamados = Array.isArray(d) ? d : (d && Array.isArray(d.chamados) ? d.chamados : []);
+    chamadosError = false;
+  }catch(e){ chamadosError = true; }
+  if(mode === 'chamados') render();
+}
+async function apiUpdateChamado(numero, data){
+  try{ await chPost('/chamados-atualizar', Object.assign({numero}, data)); return true; }
+  catch(e){ toast('Não consegui atualizar o chamado.', 'err'); await loadChamados(); return false; }
+}
+async function apiCreateChamado(data){
+  try{ await chPost('/chamados-criar', data); await loadChamados(); toast('Chamado criado.'); return true; }
+  catch(e){ toast('Não consegui criar o chamado.', 'err'); return false; }
+}
+
 /* ---------- conexão / avisos ---------- */
 function setConn(state){
   conn.state = state;
@@ -647,6 +741,8 @@ function renderBanner(){
     } else if(conn.state === 'ok' && seedLooksUntouched() && !seedWarningDismissed){
       html = `<div class="banner warn"><div class="b-text"><b>O servidor devolveu apenas as 12 missões de exemplo.</b> Se você já tinha outras, o arquivo de dados pode ter sido recriado em um deploy sem volume persistente em <b>/app/data</b>. Confira o volume no EasyPanel.</div><button class="btn" type="button" data-act="dismiss-seed">Entendi</button></div>`;
     }
+  } else if(mode === 'chamados'){
+    if(chamadosError) html = `<div class="banner err"><div class="b-text"><b>Não consegui carregar os chamados</b> (webhook do n8n). Tentando de novo a cada 15 segundos.</div><button class="btn" type="button" data-act="retry">Tentar agora</button></div>`;
   } else if(projectsError){
     html = `<div class="banner err"><div class="b-text"><b>Não consegui carregar o portfólio de projetos</b> (webhook do n8n). Tentando de novo a cada 15 segundos.</div><button class="btn" type="button" data-act="retry">Tentar agora</button></div>`;
   }
@@ -656,29 +752,34 @@ $('banner-slot').addEventListener('click', e => {
   const b = e.target.closest('[data-act]');
   if(!b) return;
   if(b.dataset.act === 'settings') openSettings();
-  else if(b.dataset.act === 'retry'){ loadCards(); loadProjects(); }
+  else if(b.dataset.act === 'retry'){ loadCards(); loadProjects(); loadChamados(); }
   else if(b.dataset.act === 'dismiss-seed'){ seedWarningDismissed = true; renderBanner(); }
 });
 
 /* ---------- modo Teia / Alfred ---------- */
 function setMode(next){
   mode = next;
-  $('mode-teia').classList.toggle('active', mode === 'teia');
-  $('mode-alfred').classList.toggle('active', mode === 'alfred');
-  $('mode-teia').setAttribute('aria-selected', mode === 'teia');
-  $('mode-alfred').setAttribute('aria-selected', mode === 'alfred');
+  ['teia','alfred','chamados'].forEach(m => {
+    $('mode-'+m).classList.toggle('active', mode === m);
+    $('mode-'+m).setAttribute('aria-selected', mode === m);
+  });
   $('quick-chips').style.display = mode === 'teia' ? '' : 'none';
-  $('subtitle-text').textContent = mode === 'teia'
-    ? 'Central de missões — Walace · AA Alternativa & projetos pessoais'
-    : 'Portfólio de projetos e automações — Walace';
-  $('btn-new').textContent = mode === 'teia' ? '+ Nova missão' : '+ Novo projeto';
-  $('f-search').placeholder = mode === 'teia' ? 'Buscar missão…  (atalho: /)' : 'Buscar projeto…  (atalho: /)';
+  $('btn-diretoria').style.display = mode === 'chamados' ? '' : 'none';
+  $('subtitle-text').textContent = {
+    teia: 'Central de missões — Walace · AA Alternativa & projetos pessoais',
+    alfred: 'Portfólio de projetos e automações — Walace',
+    chamados: 'Chamados dos setores — pedidos recebidos por WhatsApp'
+  }[mode];
+  $('btn-new').textContent = {teia:'+ Nova missão', alfred:'+ Novo projeto', chamados:'+ Novo chamado'}[mode];
+  $('f-search').placeholder = {teia:'Buscar missão…  (atalho: /)', alfred:'Buscar projeto…  (atalho: /)', chamados:'Buscar chamado…  (atalho: /)'}[mode];
   $('f-area').value = ''; $('f-prio').value = '';
   render();
 }
+function openNew(){ if(mode === 'teia') openTask(); else if(mode === 'alfred') openProject(); else openChamado(); }
 $('mode-teia').addEventListener('click', () => setMode('teia'));
 $('mode-alfred').addEventListener('click', () => setMode('alfred'));
-$('btn-new').addEventListener('click', () => mode === 'teia' ? openTask() : openProject());
+$('mode-chamados').addEventListener('click', () => setMode('chamados'));
+$('btn-new').addEventListener('click', openNew);
 
 /* ---------- filtros ---------- */
 function setQuick(m){
@@ -704,7 +805,11 @@ function isOverdue(c, t){ return !!c.prazo && c.prazo < t && c.status !== 'entre
 function fillSelects(){
   const fa = $('f-area'), fp = $('f-prio');
   const prevA = fa.value, prevP = fp.value;
-  if(mode === 'teia'){
+  if(mode === 'chamados'){
+    const setores = [...new Set(chamados.map(c => c.setor).filter(Boolean))].sort((a,b) => a.localeCompare(b,'pt-BR'));
+    fa.innerHTML = '<option value="">Todos os setores</option>' + setores.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
+    fp.innerHTML = '<option value="">Toda prioridade</option><option value="urgente">Alta</option><option value="medio">Média</option><option value="baixa">Baixa</option>';
+  } else if(mode === 'teia'){
     const areas = [...new Set(cards.map(c => c.area).filter(Boolean))].sort((a,b) => a.localeCompare(b,'pt-BR'));
     fa.innerHTML = '<option value="">Todas as áreas</option>' + areas.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
     fp.innerHTML = '<option value="">Toda prioridade</option><option value="urgente">Urgente</option><option value="medio">Médio</option><option value="baixa">Baixa</option>';
@@ -739,6 +844,14 @@ function visibleCards(){
     (quick !== 'atrasadas' || isOverdue(c, t))
   );
 }
+function visibleChamados(){
+  const fs = $('f-area').value, fp = $('f-prio').value, q = norm($('f-search').value);
+  return chamados.filter(c =>
+    (!fs || c.setor === fs) &&
+    (!fp || chPrio(c) === fp) &&
+    (!q || [c.titulo, c.descricao, c.solicitante, c.setor, c.categoria, c.notas, '#' + c.numero].some(v => norm(v).includes(q)))
+  );
+}
 function visibleProjects(){
   const fc = $('f-area').value, fe = $('f-prio').value, q = $('f-search').value.trim().toLowerCase();
   return projects.filter(p =>
@@ -756,7 +869,8 @@ function render(){
   const filtered = $('f-search').value.trim() || $('f-area').value || $('f-prio').value || (mode === 'teia' && quick !== 'tudo');
   $('btn-clear').style.display = filtered ? '' : 'none';
   if(mode === 'teia'){ renderStatsTeia(); renderBoardTeia(); }
-  else { renderStatsAlfred(); renderBoardAlfred(); }
+  else if(mode === 'alfred'){ renderStatsAlfred(); renderBoardAlfred(); }
+  else { renderStatsChamados(); renderBoardChamados(); }
 }
 
 function updateChipCounts(){
@@ -808,6 +922,55 @@ function renderStatsAlfred(){
     statHTML('Em produção', prod + '/' + total, pct + '% · progresso médio ' + avg + '%') +
     statHTML('Pausados', pausados, pausados > 0 ? 'projetos pausados' : 'nada pausado', pausados > 0 ? 'alert' : '') +
     ringHTML(pct, 'Em produção');
+}
+
+function renderStatsChamados(){
+  const total = chamados.length;
+  const resolvidos = chamados.filter(c => chStatus(c) === 'Resolvido').length;
+  const abertos = total - resolvidos;
+  const andamento = chamados.filter(c => chStatus(c) === 'Em andamento').length;
+  const altas = chamados.filter(c => chPrio(c) === 'urgente' && chStatus(c) !== 'Resolvido').length;
+  const notas = chamados.map(chNota).filter(Boolean);
+  const avg = notas.length ? (notas.reduce((a,b) => a + b, 0) / notas.length).toFixed(1).replace('.', ',') : '—';
+  const pct = total ? Math.round(resolvidos / total * 100) : 0;
+  $('stats').innerHTML =
+    statHTML('Chamados', total, abertos + ' em aberto · ' + andamento + ' em andamento') +
+    statHTML('Avaliação média', avg + (notas.length ? ' ★' : ''), notas.length + ' avaliaç' + (notas.length === 1 ? 'ão' : 'ões') + ' recebida' + (notas.length === 1 ? '' : 's')) +
+    statHTML('Prioridade alta', altas, 'em aberto', altas > 0 ? 'alert' : '') +
+    ringHTML(pct, 'Resolvido');
+}
+function chamadoHTML(c){
+  const st = chStatus(c), pr = chPrio(c), nota = chNota(c);
+  const key = esc(c.numero);
+  return `<article class="card" tabindex="0" draggable="true" data-num="${key}" style="--accent:${prioColor(pr)}">
+    <div class="card-top">
+      <div class="tags">${c.setor ? `<span class="tag tag-area">${esc(c.setor)}</span>` : ''}<span class="tag tag-prio-${pr}">${esc(chPrioLabel(c))}</span></div>
+      ${pr === 'urgente' && st !== 'Resolvido' ? '<span class="pulse" title="Prioridade alta"></span>' : ''}
+    </div>
+    <h3 class="card-title">#${key} · ${esc(c.titulo)}</h3>
+    ${c.descricao ? `<p class="card-notes">${esc(c.descricao)}</p>` : ''}
+    <div class="card-foot">
+      <span class="due">${esc(c.solicitante || '')}${c.dataAbertura ? ' · ' + esc(fmtDate(c.dataAbertura)) : ''}</span>
+      ${nota ? `<span class="due today" title="${esc(c.comentarioAvaliacao || 'Avaliação do solicitante')}">${'★'.repeat(nota)}${'☆'.repeat(5 - nota)}</span>` : ''}
+      <select class="quick-move" data-num="${key}" aria-label="Mover chamado para">
+        ${CH_COLUMNS.map(k => `<option value="${esc(k.id)}" ${k.id === st ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}
+      </select>
+    </div>
+  </article>`;
+}
+function renderBoardChamados(){
+  const vis = visibleChamados();
+  const board = $('board');
+  board.className = 'board';
+  const rank = {urgente:0, medio:1, baixa:2};
+  board.innerHTML = CH_COLUMNS.map(col => {
+    const list = vis.filter(c => chStatus(c) === col.id)
+      .sort((a,b) => (rank[chPrio(a)] - rank[chPrio(b)]) || (Number(a.numero) - Number(b.numero)));
+    return `<section class="col" aria-label="${esc(col.name)}">
+      <div class="col-head"><span class="col-dot" style="--c:${col.color}"></span><h2>${esc(col.name)}</h2><span class="col-count">${list.length}</span></div>
+      <div class="col-body" data-chstatus="${esc(col.id)}">${list.length ? list.map(chamadoHTML).join('') : emptyHTML()}</div>
+    </section>`;
+  }).join('');
 }
 
 function emptyHTML(){ return '<div class="empty-col">Nada por aqui</div>'; }
@@ -890,24 +1053,25 @@ board.addEventListener('click', e => {
   if(e.target.closest('select, a, label')) return;
   const card = e.target.closest('.card');
   if(!card) return;
-  if(card.dataset.id) openTask(card.dataset.id); else openProject(card.dataset.nome);
+  if(card.dataset.num) openChamado(card.dataset.num); else if(card.dataset.id) openTask(card.dataset.id); else openProject(card.dataset.nome);
 });
 board.addEventListener('keydown', e => {
   if((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('card')){
     e.preventDefault();
-    if(e.target.dataset.id) openTask(e.target.dataset.id); else openProject(e.target.dataset.nome);
+    if(e.target.dataset.num) openChamado(e.target.dataset.num); else if(e.target.dataset.id) openTask(e.target.dataset.id); else openProject(e.target.dataset.nome);
   }
 });
 board.addEventListener('change', e => {
   const sel = e.target.closest('.quick-move');
   if(!sel) return;
-  if(sel.dataset.id) moveCard(sel.dataset.id, sel.value);
+  if(sel.dataset.num) moveChamado(sel.dataset.num, sel.value);
+  else if(sel.dataset.id) moveCard(sel.dataset.id, sel.value);
   else moveProject(sel.dataset.nome, sel.value);
 });
 board.addEventListener('dragstart', e => {
   const card = e.target.closest && e.target.closest('.card');
   if(!card) return;
-  draggedKey = card.dataset.id || card.dataset.nome;
+  draggedKey = card.dataset.num || card.dataset.id || card.dataset.nome;
   card.classList.add('dragging');
   e.dataTransfer.effectAllowed = 'move';
   try{ e.dataTransfer.setData('text/plain', draggedKey); }catch(err){}
@@ -935,7 +1099,8 @@ board.addEventListener('drop', e => {
   body.classList.remove('dragover');
   const key = draggedKey; draggedKey = null;
   if(!key) return;
-  if(body.dataset.status) moveCard(key, body.dataset.status);
+  if(body.dataset.chstatus) moveChamado(key, body.dataset.chstatus);
+  else if(body.dataset.status) moveCard(key, body.dataset.status);
   else if(body.dataset.stage) moveProject(key, body.dataset.stage);
 });
 
@@ -946,6 +1111,15 @@ async function moveCard(id, status){
   render();
   const ok = await apiUpdate(id, {status});
   if(ok) toast('Movida para “' + colName(status) + '”.');
+}
+async function moveChamado(num, status){
+  const c = chamados.find(x => String(x.numero) === String(num));
+  if(!c || chStatus(c) === status) return;
+  c.status = status;
+  if(status === 'Resolvido' && !c.dataResolucao) c.dataResolucao = todayStr();
+  render();
+  const ok = await apiUpdateChamado(c.numero, {status});
+  if(ok) toast('Chamado #' + c.numero + ' movido para “' + chColName(status) + '”.' + (status === 'Resolvido' ? ' O solicitante receberá o pedido de avaliação.' : ''));
 }
 async function moveProject(nome, etapa){
   const p = projects.find(x => x.nome === nome);
@@ -1030,6 +1204,72 @@ $('btn-delete').addEventListener('click', async () => {
   const id = editingId;
   const ok = await apiDelete(id);
   if(ok) closeTask();
+});
+
+/* ---------- modal de chamado ---------- */
+let editingChamado = null;
+function openChamado(num){
+  editingChamado = (num !== undefined && num !== null && num !== '') ? num : null;
+  $('chamado-form').reset();
+  const info = $('ch-info');
+  info.style.display = 'none';
+  if(editingChamado !== null){
+    const c = chamados.find(x => String(x.numero) === String(editingChamado));
+    if(!c){ editingChamado = null; return; }
+    $('ch-modal-eyebrow').textContent = 'Chamado #' + c.numero;
+    $('ch-modal-title').textContent = 'Editar chamado';
+    $('ch-titulo').value = c.titulo || '';
+    $('ch-solicitante').value = c.solicitante || '';
+    $('ch-categoria').value = c.categoria || '';
+    $('ch-prioridade').value = chPrio(c) === 'urgente' ? 'Alta' : (chPrio(c) === 'baixa' ? 'Baixa' : 'Media');
+    $('ch-status').value = chStatus(c);
+    $('ch-descricao').value = c.descricao || '';
+    $('ch-notas').value = c.notas || '';
+    const partes = [];
+    if(c.setor) partes.push('Setor: <b>' + esc(c.setor) + '</b>');
+    if(c.dataAbertura) partes.push('Aberto em ' + esc(fmtDate(c.dataAbertura)));
+    if(c.dataResolucao) partes.push('Resolvido em ' + esc(fmtDate(c.dataResolucao)));
+    if(chNota(c)) partes.push('Avaliação: <b>' + chNota(c) + '/5</b>' + (c.comentarioAvaliacao ? ' — “' + esc(c.comentarioAvaliacao) + '”' : ''));
+    if(partes.length){ info.innerHTML = partes.join(' · '); info.style.display = ''; }
+  } else {
+    $('ch-modal-eyebrow').textContent = 'Novo chamado';
+    $('ch-modal-title').textContent = 'Registrar chamado';
+    $('ch-prioridade').value = 'Media';
+    $('ch-status').value = 'Aberto';
+  }
+  openOverlay('overlay-chamado', 'ch-titulo');
+}
+function closeChamado(){ closeOverlay('overlay-chamado'); editingChamado = null; }
+$('close-chamado').addEventListener('click', closeChamado);
+$('cancel-chamado').addEventListener('click', closeChamado);
+$('chamado-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const data = {
+    titulo: $('ch-titulo').value.trim(),
+    solicitante: $('ch-solicitante').value.trim(),
+    categoria: $('ch-categoria').value.trim(),
+    prioridade: $('ch-prioridade').value,
+    status: $('ch-status').value,
+    descricao: $('ch-descricao').value.trim(),
+    notas: $('ch-notas').value.trim(),
+  };
+  if(!data.titulo) return;
+  const btn = $('chamado-save'); btn.disabled = true;
+  let ok;
+  if(editingChamado !== null){
+    const c = chamados.find(x => String(x.numero) === String(editingChamado));
+    if(c) Object.assign(c, data);
+    ok = await apiUpdateChamado(editingChamado, data);
+    if(ok){
+      // gravações usam "||" no servidor: campos apagados mantêm o valor anterior; recarrega para refletir o real
+      await loadChamados(); render(); toast('Chamado atualizado.');
+    }
+  } else {
+    if(!data.solicitante) data.solicitante = 'Walace (TI)';
+    ok = await apiCreateChamado(data);
+  }
+  btn.disabled = false;
+  if(ok) closeChamado();
 });
 
 /* ---------- modal de projeto (Alfred) ---------- */
@@ -1143,27 +1383,28 @@ $('cfg-test').addEventListener('click', async () => {
 });
 
 /* ---------- geral ---------- */
-['overlay','overlay-alfred','overlay-settings'].forEach(id => {
-  $(id).addEventListener('click', e => { if(e.target.id === id) closeOverlay(id); if(id === 'overlay') editingId = null; if(id === 'overlay-alfred') editingProject = null; });
+['overlay','overlay-alfred','overlay-chamado','overlay-settings'].forEach(id => {
+  $(id).addEventListener('click', e => { if(e.target.id === id) closeOverlay(id); if(id === 'overlay') editingId = null; if(id === 'overlay-alfred') editingProject = null; if(id === 'overlay-chamado') editingChamado = null; });
 });
-function anyModalOpen(){ return ['overlay','overlay-alfred','overlay-settings'].some(id => $(id).classList.contains('open')); }
+function anyModalOpen(){ return ['overlay','overlay-alfred','overlay-chamado','overlay-settings'].some(id => $(id).classList.contains('open')); }
 document.addEventListener('keydown', e => {
-  if(e.key === 'Escape'){ if($('overlay').classList.contains('open')) closeTask(); if($('overlay-alfred').classList.contains('open')) closeProject(); if($('overlay-settings').classList.contains('open')) closeSettings(); return; }
+  if(e.key === 'Escape'){ if($('overlay').classList.contains('open')) closeTask(); if($('overlay-alfred').classList.contains('open')) closeProject(); if($('overlay-chamado').classList.contains('open')) closeChamado(); if($('overlay-settings').classList.contains('open')) closeSettings(); return; }
   const tag = (document.activeElement && document.activeElement.tagName) || '';
   if(/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || e.ctrlKey || e.metaKey || e.altKey || anyModalOpen()) return;
   if(e.key === '/'){ e.preventDefault(); $('f-search').focus(); }
-  else if(e.key === 'n' || e.key === 'N'){ e.preventDefault(); mode === 'teia' ? openTask() : openProject(); }
+  else if(e.key === 'n' || e.key === 'N'){ e.preventDefault(); openNew(); }
 });
 
 // Atualização automática: a cada 15s, mas nunca com modal aberto ou durante um arraste.
 function isBusy(){ return anyModalOpen() || draggedKey !== null; }
-setInterval(() => { if(document.hidden || isBusy()) return; loadCards(); loadProjects(); }, AUTO_REFRESH_MS);
-document.addEventListener('visibilitychange', () => { if(!document.hidden){ loadCards(); loadProjects(); } });
+setInterval(() => { if(document.hidden || isBusy()) return; loadCards(); loadProjects(); loadChamados(); }, AUTO_REFRESH_MS);
+document.addEventListener('visibilitychange', () => { if(!document.hidden){ loadCards(); loadProjects(); loadChamados(); } });
 
 setConn('unknown');
 setMode('teia');
 loadCards();
 loadProjects();
+loadChamados();
 </script>
 </body>
 </html>
